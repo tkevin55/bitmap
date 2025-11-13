@@ -26,8 +26,6 @@ export class ConversionController {
         return;
       }
 
-      const isPro = req.user?.isPro || false;
-
       // Parse settings from request body
       const settings: ConversionSettings = {
         size: parseInt(req.body.size) || 50,
@@ -52,29 +50,10 @@ export class ConversionController {
         return;
       }
 
-      // Check if color mode requires PRO
-      if (settings.mode === 'color' && !isPro) {
-        res.status(403).json({
-          message: 'Color mode requires PRO subscription',
-          code: 'PRO_REQUIRED',
-        });
-        return;
-      }
-
-      // Check if high-res export requires PRO
-      if (maxDimension && maxDimension > 4096 && !isPro) {
-        res.status(403).json({
-          message: 'High-resolution export requires PRO subscription',
-          code: 'PRO_REQUIRED',
-        });
-        return;
-      }
-
-      // Apply PRO limits for maxDimension
+      // All features available - no PRO restrictions
+      // Apply max dimension limit (10000px max)
       const effectiveMaxDimension = maxDimension
-        ? isPro
-          ? Math.min(maxDimension, 10000)
-          : Math.min(maxDimension, 4096)
+        ? Math.min(maxDimension, 10000)
         : undefined;
 
       logger.info('Processing conversion', {
@@ -109,11 +88,8 @@ export class ConversionController {
       const outputStats = await fs.stat(outputPath);
       const outputSize = outputStats.size;
 
-      // Deduct credits if user is authenticated and not PRO
+      // No credit deduction - all features free for now
       let creditsRemaining: number | undefined;
-      if (req.user) {
-        creditsRemaining = await authService.deductCredits(req.user.userId);
-      }
 
       // Log conversion
       await prisma.conversion.create({

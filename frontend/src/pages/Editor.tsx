@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, Download, Settings, Loader, Lock } from 'lucide-react';
+import { Upload, Download, Settings, Loader } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { ConversionSettings, DEFAULT_SETTINGS, DitheringMethod } from '../../../shared/types';
 import { useAuth } from '../context/AuthContext';
@@ -30,8 +30,6 @@ const Editor: React.FC = () => {
   const [exportFormat, setExportFormat] = useState<'svg' | 'png' | 'jpg'>('svg');
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const isPro = user?.isPro || false;
-
   // File drop handler
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const file = acceptedFiles[0];
@@ -51,7 +49,7 @@ const Editor: React.FC = () => {
       'image/webp': ['.webp'],
     },
     maxFiles: 1,
-    maxSize: isPro ? 50 * 1024 * 1024 : 10 * 1024 * 1024,
+    maxSize: 50 * 1024 * 1024, // 50MB for everyone
   });
 
   // Draw pixelated preview on canvas with real-time updates
@@ -129,45 +127,40 @@ const Editor: React.FC = () => {
       return;
     }
 
-    if (settings.mode === 'color' && !isPro) {
-      toast.error('Color mode requires PRO subscription');
-      return;
-    }
-
     setProcessing(true);
 
     try {
-      const maxDimension = isPro ? 10000 : 4096;
+      const maxDimension = 10000; // Maximum resolution for everyone
       const response = await api.convertImage(uploadedFile, {
         settings,
         format: exportFormat,
         maxWidth: maxDimension,
       });
 
+      console.log('Conversion response:', response);
+
       if (response.fileData) {
         setOutputData(response.fileData);
-        toast.success(`Converted to ${exportFormat.toUpperCase()}!`);
+        toast.success(`Converted to ${exportFormat.toUpperCase()}! Click "Download Result" to save.`);
       } else if (response.downloadUrl) {
-        // Download from server
-        window.open(response.downloadUrl, '_blank');
+        // For larger files, download from server
+        const fullUrl = response.downloadUrl.startsWith('http')
+          ? response.downloadUrl
+          : `${window.location.origin}${response.downloadUrl}`;
+        window.open(fullUrl, '_blank');
         toast.success('Download started!');
+      } else {
+        toast.error('No file data or download URL received');
       }
 
-      // Update user credits
-      if (user && !isPro) {
+      // Refresh user if authenticated
+      if (user) {
         await refreshUser();
-        toast.success(`${response.creditsRemaining} credits remaining`);
       }
     } catch (error: any) {
+      console.error('Conversion error:', error);
       const message = error.response?.data?.message || 'Conversion failed';
       toast.error(message);
-
-      if (error.response?.data?.code === 'PRO_REQUIRED') {
-        // Redirect to pricing
-        setTimeout(() => {
-          window.location.href = '/pricing';
-        }, 2000);
-      }
     } finally {
       setProcessing(false);
     }
@@ -175,12 +168,19 @@ const Editor: React.FC = () => {
 
   // Download output
   const handleDownload = () => {
-    if (!outputData) return;
+    if (!outputData) {
+      toast.error('No output data available');
+      return;
+    }
 
-    const ext = outputData.startsWith('data:image/svg') ? 'svg' :
-                 outputData.startsWith('data:image/png') ? 'png' : 'jpg';
-    downloadFile(outputData, `pixelated-${Date.now()}.${ext}`);
-    toast.success('Downloaded!');
+    try {
+      const ext = exportFormat; // Use the selected export format
+      downloadFile(outputData, `pixelated-${Date.now()}.${ext}`);
+      toast.success('Downloaded!');
+    } catch (error) {
+      console.error('Download error:', error);
+      toast.error('Failed to download file');
+    }
   };
 
   return (
@@ -194,11 +194,7 @@ const Editor: React.FC = () => {
           </p>
           {user && (
             <p className="mt-2 text-sm text-gray-500">
-              {isPro ? (
-                <span className="text-primary-600 font-semibold">PRO - Unlimited</span>
-              ) : (
-                <span>{user.credits} credits remaining</span>
-              )}
+              <span className="text-primary-600 font-semibold">All features unlocked</span>
             </p>
           )}
         </div>
@@ -222,7 +218,7 @@ const Editor: React.FC = () => {
                   {isDragActive ? 'Drop your image here' : 'Drop image or click to upload'}
                 </p>
                 <p className="text-sm text-gray-500">
-                  PNG, JPG, WebP • Max {isPro ? '50MB' : '10MB'}
+                  PNG, JPG, WebP • Max 50MB
                 </p>
               </div>
             ) : (
@@ -286,20 +282,13 @@ const Editor: React.FC = () => {
                       Black & White
                     </button>
                     <button
-                      onClick={() => {
-                        if (isPro) {
-                          setSettings({ ...settings, mode: 'color' });
-                        } else {
-                          toast.error('Color mode requires PRO subscription');
-                        }
-                      }}
-                      className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-1 ${
+                      onClick={() => setSettings({ ...settings, mode: 'color' })}
+                      className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors ${
                         settings.mode === 'color'
                           ? 'bg-primary-600 text-white'
                           : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                      } ${!isPro && 'opacity-50 cursor-not-allowed'}`}
+                      }`}
                     >
-                      {!isPro && <Lock className="w-4 h-4" />}
                       Color
                     </button>
                   </div>
