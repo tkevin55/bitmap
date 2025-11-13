@@ -1,7 +1,10 @@
 import axios, { AxiosInstance } from 'axios';
 import { ConversionRequest, ConversionResponse, AuthResponse, User } from '../../../shared/types';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001/api';
+
+// Log API URL on initialization
+console.log('🔗 API Client initialized with URL:', API_URL);
 
 class ApiClient {
   private client: AxiosInstance;
@@ -83,6 +86,14 @@ class ApiClient {
 
   // Conversion endpoints
   async convertImage(file: File, request: ConversionRequest): Promise<ConversionResponse> {
+    console.log('📤 API: Converting image:', {
+      fileName: file.name,
+      fileSize: file.size,
+      settings: request.settings,
+      format: request.format,
+      maxWidth: request.maxWidth,
+    });
+
     const formData = new FormData();
     formData.append('image', file);
     formData.append('size', request.settings.size.toString());
@@ -104,13 +115,32 @@ class ApiClient {
       }
     }
 
-    const { data } = await this.client.post('/conversion/convert', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    });
+    console.log('📤 Sending to:', `${API_URL}/conversion/convert`);
 
-    return data;
+    try {
+      const { data } = await this.client.post('/conversion/convert', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+
+      console.log('📥 API response received:', {
+        hasFileData: !!data.fileData,
+        hasDownloadUrl: !!data.downloadUrl,
+        fileSize: data.fileSize,
+        processingTime: data.processingTime,
+      });
+
+      return data;
+    } catch (error: any) {
+      console.error('❌ API conversion error:', {
+        message: error.message,
+        status: error.response?.status,
+        data: error.response?.data,
+        url: error.config?.url,
+      });
+      throw error;
+    }
   }
 
   async getConversionHistory(page: number = 1, limit: number = 20) {

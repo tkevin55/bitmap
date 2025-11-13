@@ -36,6 +36,7 @@ const Editor: React.FC = () => {
   const generatePreview = useCallback(async (file: File, currentSettings: ConversionSettings) => {
     if (!file) return;
 
+    console.log('🎨 Generating preview with settings:', currentSettings);
     setGeneratingPreview(true);
 
     try {
@@ -46,14 +47,30 @@ const Editor: React.FC = () => {
         maxWidth: 800, // Lower resolution for faster preview
       });
 
+      console.log('✅ Preview response:', response);
+
       if (response.fileData) {
         setPreviewUrl(response.fileData);
+        console.log('✅ Preview URL set');
+      } else if (response.downloadUrl) {
+        console.warn('⚠️ Got downloadUrl instead of fileData for preview');
+        // For preview, we need to fetch the image
+        const fullUrl = response.downloadUrl.startsWith('http')
+          ? response.downloadUrl
+          : `${window.location.origin}${response.downloadUrl}`;
+        setPreviewUrl(fullUrl);
       } else {
-        console.error('No preview data received');
+        console.error('❌ No preview data received:', response);
+        toast.error('Failed to generate preview');
       }
-    } catch (error) {
-      console.error('Preview generation error:', error);
-      // Don't show error toast for preview failures
+    } catch (error: any) {
+      console.error('❌ Preview generation error:', error);
+      console.error('Error details:', {
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+      });
+      toast.error(`Preview failed: ${error.response?.data?.message || error.message || 'Unknown error'}`);
     } finally {
       setGeneratingPreview(false);
     }
