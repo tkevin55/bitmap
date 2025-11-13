@@ -83,27 +83,13 @@ export class ImageProcessorService {
           const g = data[idx + 1];
           const b = data[idx + 2];
 
-          let pixelData: PixelData;
-
-          if (settings.mode === 'bw') {
-            // Black & white mode: apply threshold
-            const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-            const value = gray >= settings.threshold ? 255 : 0;
-            pixelData = {
-              r: value,
-              g: value,
-              b: value,
-              hex: value === 255 ? '#ffffff' : '#000000',
-            };
-          } else {
-            // Color mode: use original colors (palette reduction happens later)
-            pixelData = {
-              r,
-              g,
-              b,
-              hex: this.rgbToHex(r, g, b),
-            };
-          }
+          // Store original RGB values
+          const pixelData: PixelData = {
+            r,
+            g,
+            b,
+            hex: this.rgbToHex(r, g, b),
+          };
 
           row.push(pixelData);
         }
@@ -112,12 +98,17 @@ export class ImageProcessorService {
 
       let palette: string[] | undefined;
 
-      if (settings.mode === 'color') {
-        // Extract palette and apply dithering
+      if (settings.mode === 'bw') {
+        // Black & white mode: apply threshold and optional dithering
+        const result = this.applyBWProcessing(pixelGrid, settings);
+        pixelGrid = result.pixelGrid;
+      } else {
+        // Color mode: extract palette and apply dithering
         const result = await this.applyColorProcessing(
           pixelGrid,
           settings
         );
+        pixelGrid = result.pixelGrid;
         palette = result.palette;
       }
 
@@ -136,6 +127,367 @@ export class ImageProcessorService {
       logger.error('Error processing image:', error);
       throw new Error(`Image processing failed: ${error}`);
     }
+  }
+
+  /**
+   * Apply black & white processing with optional dithering
+   */
+  private applyBWProcessing(
+    pixelGrid: PixelData[][],
+    settings: ConversionSettings
+  ): { pixelGrid: PixelData[][] } {
+    const threshold = settings.threshold;
+    const dithering = settings.dithering || 'none';
+    const height = pixelGrid.length;
+    const width = pixelGrid[0].length;
+
+    // Convert to grayscale first
+    const grayGrid = pixelGrid.map((row) =>
+      row.map((pixel) => {
+        const gray = 0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b;
+        return { r: gray, g: gray, b: gray };
+      })
+    );
+
+    // B&W palette is just black and white
+    const bwPalette = [
+      { r: 0, g: 0, b: 0 },     // Black
+      { r: 255, g: 255, b: 255 } // White
+    ];
+
+    let processedGrid: PixelData[][];
+
+    if (dithering !== 'none') {
+      // Apply dithering with threshold consideration
+      const workingGrid = grayGrid.map(row => row.map(p => ({ ...p })));
+
+      switch (dithering) {
+        case 'floyd-steinberg':
+          processedGrid = this.floydSteinbergDitherBW(workingGrid, threshold);
+          break;
+        case 'atkinson':
+          processedGrid = this.atkinsonDitherBW(workingGrid, threshold);
+          break;
+        case 'jarvis-judice-ninke':
+          processedGrid = this.jarvisJudiceNinkeDitherBW(workingGrid, threshold);
+          break;
+        case 'stucki':
+          processedGrid = this.stuckiDitherBW(workingGrid, threshold);
+          break;
+        case 'bayer-2x2':
+          processedGrid = this.bayerDitherBW(grayGrid, threshold, 2);
+          break;
+        case 'bayer-4x4':
+          processedGrid = this.bayerDitherBW(grayGrid, threshold, 4);
+          break;
+        case 'bayer-8x8':
+          processedGrid = this.bayerDitherBW(grayGrid, threshold, 8);
+          break;
+        case 'clustered-4x4':
+          processedGrid = this.clusteredDitherBW(grayGrid, threshold);
+          break;
+        case 'random':
+          processedGrid = this.randomDitherBW(grayGrid, threshold);
+          break;
+        default:
+          // Simple threshold
+          processedGrid = this.simpleThreshold(grayGrid, threshold);
+      }
+    } else {
+      // Simple threshold without dithering
+      processedGrid = this.simpleThreshold(grayGrid, threshold);
+    }
+
+    return { pixelGrid: processedGrid };
+  }
+
+  /**
+   * Simple threshold (no dithering)
+   */
+  private simpleThreshold(
+    grayGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    threshold: number
+  ): PixelData[][] {
+    return grayGrid.map((row) =>
+      row.map((pixel) => {
+        const value = pixel.r >= threshold ? 255 : 0;
+        return {
+          r: value,
+          g: value,
+          b: value,
+          hex: value === 255 ? '#ffffff' : '#000000',
+        };
+      })
+    );
+  }
+
+  /**
+   * Floyd-Steinberg dithering for B&W
+   */
+  private floydSteinbergDitherBW(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    threshold: number
+  ): PixelData[][] {
+    const height = workingGrid.length;
+    const width = workingGrid[0].length;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const oldValue = workingGrid[y][x].r;
+        const newValue = oldValue >= threshold ? 255 : 0;
+        workingGrid[y][x].r = newValue;
+        workingGrid[y][x].g = newValue;
+        workingGrid[y][x].b = newValue;
+
+        const err = oldValue - newValue;
+
+        // Distribute error
+        if (x + 1 < width) {
+          workingGrid[y][x + 1].r += (err * 7) / 16;
+        }
+        if (y + 1 < height) {
+          if (x > 0) {
+            workingGrid[y + 1][x - 1].r += (err * 3) / 16;
+          }
+          workingGrid[y + 1][x].r += (err * 5) / 16;
+          if (x + 1 < width) {
+            workingGrid[y + 1][x + 1].r += (err * 1) / 16;
+          }
+        }
+      }
+    }
+
+    return this.clampAndConvert(workingGrid);
+  }
+
+  /**
+   * Atkinson dithering for B&W
+   */
+  private atkinsonDitherBW(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    threshold: number
+  ): PixelData[][] {
+    const height = workingGrid.length;
+    const width = workingGrid[0].length;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const oldValue = workingGrid[y][x].r;
+        const newValue = oldValue >= threshold ? 255 : 0;
+        workingGrid[y][x].r = newValue;
+        workingGrid[y][x].g = newValue;
+        workingGrid[y][x].b = newValue;
+
+        const err = (oldValue - newValue) / 8;
+
+        // Distribute error (Atkinson pattern)
+        if (x + 1 < width) workingGrid[y][x + 1].r += err;
+        if (x + 2 < width) workingGrid[y][x + 2].r += err;
+        if (y + 1 < height) {
+          if (x > 0) workingGrid[y + 1][x - 1].r += err;
+          workingGrid[y + 1][x].r += err;
+          if (x + 1 < width) workingGrid[y + 1][x + 1].r += err;
+        }
+        if (y + 2 < height) {
+          workingGrid[y + 2][x].r += err;
+        }
+      }
+    }
+
+    return this.clampAndConvert(workingGrid);
+  }
+
+  /**
+   * Jarvis-Judice-Ninke dithering for B&W
+   */
+  private jarvisJudiceNinkeDitherBW(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    threshold: number
+  ): PixelData[][] {
+    const height = workingGrid.length;
+    const width = workingGrid[0].length;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const oldValue = workingGrid[y][x].r;
+        const newValue = oldValue >= threshold ? 255 : 0;
+        workingGrid[y][x].r = newValue;
+        workingGrid[y][x].g = newValue;
+        workingGrid[y][x].b = newValue;
+
+        const err = oldValue - newValue;
+
+        // Distribute error (JJN pattern)
+        if (x + 1 < width) workingGrid[y][x + 1].r += (err * 7) / 48;
+        if (x + 2 < width) workingGrid[y][x + 2].r += (err * 5) / 48;
+
+        if (y + 1 < height) {
+          if (x > 1) workingGrid[y + 1][x - 2].r += (err * 3) / 48;
+          if (x > 0) workingGrid[y + 1][x - 1].r += (err * 5) / 48;
+          workingGrid[y + 1][x].r += (err * 7) / 48;
+          if (x + 1 < width) workingGrid[y + 1][x + 1].r += (err * 5) / 48;
+          if (x + 2 < width) workingGrid[y + 1][x + 2].r += (err * 3) / 48;
+        }
+
+        if (y + 2 < height) {
+          if (x > 1) workingGrid[y + 2][x - 2].r += (err * 1) / 48;
+          if (x > 0) workingGrid[y + 2][x - 1].r += (err * 3) / 48;
+          workingGrid[y + 2][x].r += (err * 5) / 48;
+          if (x + 1 < width) workingGrid[y + 2][x + 1].r += (err * 3) / 48;
+          if (x + 2 < width) workingGrid[y + 2][x + 2].r += (err * 1) / 48;
+        }
+      }
+    }
+
+    return this.clampAndConvert(workingGrid);
+  }
+
+  /**
+   * Stucki dithering for B&W
+   */
+  private stuckiDitherBW(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    threshold: number
+  ): PixelData[][] {
+    const height = workingGrid.length;
+    const width = workingGrid[0].length;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const oldValue = workingGrid[y][x].r;
+        const newValue = oldValue >= threshold ? 255 : 0;
+        workingGrid[y][x].r = newValue;
+        workingGrid[y][x].g = newValue;
+        workingGrid[y][x].b = newValue;
+
+        const err = oldValue - newValue;
+
+        // Distribute error (Stucki pattern)
+        if (x + 1 < width) workingGrid[y][x + 1].r += (err * 8) / 42;
+        if (x + 2 < width) workingGrid[y][x + 2].r += (err * 4) / 42;
+
+        if (y + 1 < height) {
+          if (x > 1) workingGrid[y + 1][x - 2].r += (err * 2) / 42;
+          if (x > 0) workingGrid[y + 1][x - 1].r += (err * 4) / 42;
+          workingGrid[y + 1][x].r += (err * 8) / 42;
+          if (x + 1 < width) workingGrid[y + 1][x + 1].r += (err * 4) / 42;
+          if (x + 2 < width) workingGrid[y + 1][x + 2].r += (err * 2) / 42;
+        }
+
+        if (y + 2 < height) {
+          if (x > 1) workingGrid[y + 2][x - 2].r += (err * 1) / 42;
+          if (x > 0) workingGrid[y + 2][x - 1].r += (err * 2) / 42;
+          workingGrid[y + 2][x].r += (err * 4) / 42;
+          if (x + 1 < width) workingGrid[y + 2][x + 1].r += (err * 2) / 42;
+          if (x + 2 < width) workingGrid[y + 2][x + 2].r += (err * 1) / 42;
+        }
+      }
+    }
+
+    return this.clampAndConvert(workingGrid);
+  }
+
+  /**
+   * Bayer matrix dithering for B&W
+   */
+  private bayerDitherBW(
+    grayGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    threshold: number,
+    matrixSize: number
+  ): PixelData[][] {
+    const height = grayGrid.length;
+    const width = grayGrid[0].length;
+
+    // Bayer matrices
+    const bayer2 = [
+      [0, 2],
+      [3, 1]
+    ];
+
+    const bayer4 = [
+      [0, 8, 2, 10],
+      [12, 4, 14, 6],
+      [3, 11, 1, 9],
+      [15, 7, 13, 5]
+    ];
+
+    const bayer8 = [
+      [0, 32, 8, 40, 2, 34, 10, 42],
+      [48, 16, 56, 24, 50, 18, 58, 26],
+      [12, 44, 4, 36, 14, 46, 6, 38],
+      [60, 28, 52, 20, 62, 30, 54, 22],
+      [3, 35, 11, 43, 1, 33, 9, 41],
+      [51, 19, 59, 27, 49, 17, 57, 25],
+      [15, 47, 7, 39, 13, 45, 5, 37],
+      [63, 31, 55, 23, 61, 29, 53, 21]
+    ];
+
+    const matrix = matrixSize === 2 ? bayer2 : matrixSize === 4 ? bayer4 : bayer8;
+    const divisor = matrixSize === 2 ? 4 : matrixSize === 4 ? 16 : 64;
+
+    return grayGrid.map((row, y) =>
+      row.map((pixel, x) => {
+        const bayerValue = matrix[y % matrixSize][x % matrixSize];
+        const scaledThreshold = threshold + ((bayerValue / divisor - 0.5) * 128);
+        const value = pixel.r >= scaledThreshold ? 255 : 0;
+        return {
+          r: value,
+          g: value,
+          b: value,
+          hex: value === 255 ? '#ffffff' : '#000000',
+        };
+      })
+    );
+  }
+
+  /**
+   * Clustered dot dithering for B&W
+   */
+  private clusteredDitherBW(
+    grayGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    threshold: number
+  ): PixelData[][] {
+    const clusteredMatrix = [
+      [12, 5, 6, 13],
+      [4, 0, 1, 7],
+      [11, 3, 2, 8],
+      [15, 10, 9, 14]
+    ];
+
+    return grayGrid.map((row, y) =>
+      row.map((pixel, x) => {
+        const clusterValue = clusteredMatrix[y % 4][x % 4];
+        const scaledThreshold = threshold + ((clusterValue / 16 - 0.5) * 128);
+        const value = pixel.r >= scaledThreshold ? 255 : 0;
+        return {
+          r: value,
+          g: value,
+          b: value,
+          hex: value === 255 ? '#ffffff' : '#000000',
+        };
+      })
+    );
+  }
+
+  /**
+   * Random dithering for B&W
+   */
+  private randomDitherBW(
+    grayGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    threshold: number
+  ): PixelData[][] {
+    return grayGrid.map((row) =>
+      row.map((pixel) => {
+        const randomOffset = (Math.random() - 0.5) * 64;
+        const value = pixel.r >= threshold + randomOffset ? 255 : 0;
+        return {
+          r: value,
+          g: value,
+          b: value,
+          hex: value === 255 ? '#ffffff' : '#000000',
+        };
+      })
+    );
   }
 
   /**
@@ -168,30 +520,152 @@ export class ImageProcessorService {
   }
 
   /**
-   * Extract color palette using median cut algorithm
+   * Extract color palette using K-means clustering
    */
   private extractPalette(pixelGrid: PixelData[][], size: number): string[] {
-    // Collect all unique colors
-    const colorMap = new Map<string, { r: number; g: number; b: number; count: number }>();
+    // Collect all pixels as color points
+    const pixels: Array<{ r: number; g: number; b: number }> = [];
 
     for (const row of pixelGrid) {
       for (const pixel of row) {
-        const key = pixel.hex;
-        const existing = colorMap.get(key);
-        if (existing) {
-          existing.count++;
+        pixels.push({ r: pixel.r, g: pixel.g, b: pixel.b });
+      }
+    }
+
+    // If we have fewer pixels than requested palette size, just use unique colors
+    if (pixels.length <= size) {
+      const uniqueColors = new Set(pixels.map(p => this.rgbToHex(p.r, p.g, p.b)));
+      return Array.from(uniqueColors);
+    }
+
+    // K-means clustering
+    const palette = this.kMeansClustering(pixels, size);
+    return palette.map(color => this.rgbToHex(color.r, color.g, color.b));
+  }
+
+  /**
+   * K-means clustering for color quantization
+   */
+  private kMeansClustering(
+    pixels: Array<{ r: number; g: number; b: number }>,
+    k: number,
+    maxIterations: number = 20
+  ): Array<{ r: number; g: number; b: number }> {
+    // Initialize centroids using K-means++ algorithm
+    let centroids = this.initializeKMeansPlusPlus(pixels, k);
+
+    for (let iteration = 0; iteration < maxIterations; iteration++) {
+      // Assign pixels to nearest centroid
+      const clusters: Array<Array<{ r: number; g: number; b: number }>> = Array(k).fill(null).map(() => []);
+
+      for (const pixel of pixels) {
+        let minDist = Infinity;
+        let closestCentroid = 0;
+
+        for (let i = 0; i < k; i++) {
+          const dist = this.colorDistance(pixel, centroids[i]);
+          if (dist < minDist) {
+            minDist = dist;
+            closestCentroid = i;
+          }
+        }
+
+        clusters[closestCentroid].push(pixel);
+      }
+
+      // Calculate new centroids
+      const newCentroids: Array<{ r: number; g: number; b: number }> = [];
+      let changed = false;
+
+      for (let i = 0; i < k; i++) {
+        if (clusters[i].length === 0) {
+          // Keep old centroid if cluster is empty
+          newCentroids.push(centroids[i]);
         } else {
-          colorMap.set(key, { r: pixel.r, g: pixel.g, b: pixel.b, count: 1 });
+          const avgR = clusters[i].reduce((sum, p) => sum + p.r, 0) / clusters[i].length;
+          const avgG = clusters[i].reduce((sum, p) => sum + p.g, 0) / clusters[i].length;
+          const avgB = clusters[i].reduce((sum, p) => sum + p.b, 0) / clusters[i].length;
+
+          newCentroids.push({
+            r: Math.round(avgR),
+            g: Math.round(avgG),
+            b: Math.round(avgB)
+          });
+
+          // Check if centroid has changed
+          if (Math.abs(newCentroids[i].r - centroids[i].r) > 1 ||
+              Math.abs(newCentroids[i].g - centroids[i].g) > 1 ||
+              Math.abs(newCentroids[i].b - centroids[i].b) > 1) {
+            changed = true;
+          }
+        }
+      }
+
+      centroids = newCentroids;
+
+      // Stop if converged
+      if (!changed) {
+        break;
+      }
+    }
+
+    return centroids;
+  }
+
+  /**
+   * K-means++ initialization for better initial centroids
+   */
+  private initializeKMeansPlusPlus(
+    pixels: Array<{ r: number; g: number; b: number }>,
+    k: number
+  ): Array<{ r: number; g: number; b: number }> {
+    const centroids: Array<{ r: number; g: number; b: number }> = [];
+
+    // Choose first centroid randomly
+    const firstIndex = Math.floor(Math.random() * pixels.length);
+    centroids.push({ ...pixels[firstIndex] });
+
+    // Choose remaining centroids
+    for (let i = 1; i < k; i++) {
+      const distances: number[] = [];
+      let totalDistance = 0;
+
+      // Calculate distance from each pixel to nearest centroid
+      for (const pixel of pixels) {
+        let minDist = Infinity;
+        for (const centroid of centroids) {
+          const dist = this.colorDistance(pixel, centroid);
+          minDist = Math.min(minDist, dist);
+        }
+        distances.push(minDist * minDist); // Square the distance for weighted probability
+        totalDistance += minDist * minDist;
+      }
+
+      // Choose next centroid with probability proportional to distance
+      let random = Math.random() * totalDistance;
+      for (let j = 0; j < pixels.length; j++) {
+        random -= distances[j];
+        if (random <= 0) {
+          centroids.push({ ...pixels[j] });
+          break;
         }
       }
     }
 
-    // Simple palette extraction: take most common colors
-    const sortedColors = Array.from(colorMap.entries())
-      .sort((a, b) => b[1].count - a[1].count)
-      .slice(0, size);
+    return centroids;
+  }
 
-    return sortedColors.map(([hex]) => hex);
+  /**
+   * Calculate Euclidean distance between two colors
+   */
+  private colorDistance(
+    color1: { r: number; g: number; b: number },
+    color2: { r: number; g: number; b: number }
+  ): number {
+    const dr = color1.r - color2.r;
+    const dg = color1.g - color2.g;
+    const db = color1.b - color2.b;
+    return Math.sqrt(dr * dr + dg * dg + db * db);
   }
 
   /**

@@ -118,7 +118,7 @@ const Editor: React.FC = () => {
       ctx.drawImage(canvas, 0, 0, gridWidth, gridHeight, 0, 0, width, height);
     };
     img.src = previewUrl;
-  }, [previewUrl, settings.size, settings.threshold, settings.mode]);
+  }, [previewUrl, settings.size, settings.threshold, settings.mode, settings.dithering, settings.paletteSize, settings.blur]);
 
   // Handle conversion
   const handleConvert = async () => {
@@ -312,6 +312,29 @@ const Editor: React.FC = () => {
                   <p className="text-xs text-gray-500 mt-1">Blocks per shorter side</p>
                 </div>
 
+                {/* Dithering (both modes) */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Dithering
+                  </label>
+                  <select
+                    value={settings.dithering || 'floyd-steinberg'}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        dithering: e.target.value as DitheringMethod,
+                      })
+                    }
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                  >
+                    {DITHERING_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 {/* Threshold (B&W mode) */}
                 {settings.mode === 'bw' && (
                   <div>
@@ -349,28 +372,6 @@ const Editor: React.FC = () => {
                         }
                         className="w-full"
                       />
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Dithering
-                      </label>
-                      <select
-                        value={settings.dithering || 'floyd-steinberg'}
-                        onChange={(e) =>
-                          setSettings({
-                            ...settings,
-                            dithering: e.target.value as DitheringMethod,
-                          })
-                        }
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                      >
-                        {DITHERING_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
                     </div>
 
                     <div>
