@@ -1,0 +1,63 @@
+// Prisma schema for Bitmap Pixelator
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String       @id @default(uuid())
+  email             String       @unique
+  password          String?      // Null for OAuth users
+  name              String?
+  isPro             Boolean      @default(false)
+  credits           Int          @default(5)
+  stripeCustomerId  String?      @unique
+  stripeSubscriptionId String?   @unique
+  subscriptionStatus String?     // active, canceled, past_due
+  subscriptionEndsAt DateTime?
+  provider          String       @default("local") // local, google
+  providerId        String?      // OAuth provider user ID
+  emailVerified     Boolean      @default(false)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  conversions       Conversion[]
+
+  @@index([email])
+  @@index([stripeCustomerId])
+}
+
+model Conversion {
+  id            String   @id @default(uuid())
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  originalName  String
+  format        String   // svg, png, jpg
+  mode          String   // bw, color
+  settings      Json     // { pixelSize, threshold, palette, dithering }
+  fileSize      Int      // in bytes
+  outputSize    Int?     // output file size in bytes
+  processingTime Int?    // in milliseconds
+  ipAddress     String?  // for anonymous users
+  createdAt     DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model ApiKey {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  userId    String
+  name      String
+  lastUsed  DateTime?
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([key])
+  @@index([userId])
+}
