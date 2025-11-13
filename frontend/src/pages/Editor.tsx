@@ -1,19 +1,33 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, Download, Settings, Loader } from 'lucide-react';
+import { Upload, Download, Settings, Loader, Lock } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { ConversionSettings, DEFAULT_SETTINGS } from '../../../shared/types';
+import { ConversionSettings, DEFAULT_SETTINGS, DitheringMethod } from '../../../shared/types';
 import { useAuth } from '../context/AuthContext';
 import api from '../lib/api';
 import { downloadFile, formatFileSize } from '../lib/utils';
 
+const DITHERING_OPTIONS: { value: DitheringMethod; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'floyd-steinberg', label: 'Floyd-Steinberg' },
+  { value: 'atkinson', label: 'Atkinson' },
+  { value: 'jarvis-judice-ninke', label: 'Jarvis-Judice-Ninke' },
+  { value: 'stucki', label: 'Stucki' },
+  { value: 'bayer-2x2', label: 'Bayer 2×2' },
+  { value: 'bayer-4x4', label: 'Bayer 4×4' },
+  { value: 'bayer-8x8', label: 'Bayer 8×8' },
+  { value: 'clustered-4x4', label: 'Clustered 4×4' },
+  { value: 'random', label: 'Random' },
+];
+
 const Editor: React.FC = () => {
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [settings, setSettings] = useState<ConversionSettings>(DEFAULT_SETTINGS);
   const [processing, setProcessing] = useState(false);
   const [outputData, setOutputData] = useState<string | null>(null);
+  const [exportFormat, setExportFormat] = useState<'svg' | 'png' | 'jpg'>('svg');
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const isPro = user?.isPro || false;
@@ -40,7 +54,7 @@ const Editor: React.FC = () => {
     maxSize: isPro ? 50 * 1024 * 1024 : 10 * 1024 * 1024,
   });
 
-  // Draw pixelated preview on canvas
+  // Draw pixelated preview on canvas with real-time updates
   useEffect(() => {
     if (!previewUrl || !canvasRef.current) return;
 
@@ -50,7 +64,7 @@ const Editor: React.FC = () => {
 
     const img = new Image();
     img.onload = () => {
-      // Calculate dimensions
+      // Calculate preview dimensions
       const maxWidth = 600;
       const maxHeight = 400;
       let width = img.width;
@@ -68,17 +82,26 @@ const Editor: React.FC = () => {
       canvas.width = width;
       canvas.height = height;
 
-      // Draw pixelated preview
-      const pixelSize = settings.pixelSize;
-      const w = Math.floor(width / pixelSize);
-      const h = Math.floor(height / pixelSize);
+      // Calculate grid dimensions based on size setting
+      const shorterSide = Math.min(img.width, img.height);
+      const longerSide = Math.max(img.width, img.height);
+      const aspectRatio = longerSide / shorterSide;
 
-      // Draw scaled down
+      let gridWidth: number, gridHeight: number;
+      if (img.width <= img.height) {
+        gridWidth = settings.size;
+        gridHeight = Math.round(settings.size * aspectRatio);
+      } else {
+        gridWidth = Math.round(settings.size * aspectRatio);
+        gridHeight = settings.size;
+      }
+
+      // Draw pixelated preview
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(img, 0, 0, w, h);
+      ctx.drawImage(img, 0, 0, gridWidth, gridHeight);
 
       // Get pixel data
-      const imageData = ctx.getImageData(0, 0, w, h);
+      const imageData = ctx.getImageData(0, 0, gridWidth, gridHeight);
       const data = imageData.data;
 
       // Apply threshold for B&W mode
@@ -94,13 +117,13 @@ const Editor: React.FC = () => {
       }
 
       // Scale up to show pixels
-      ctx.drawImage(canvas, 0, 0, w, h, 0, 0, width, height);
+      ctx.drawImage(canvas, 0, 0, gridWidth, gridHeight, 0, 0, width, height);
     };
     img.src = previewUrl;
-  }, [previewUrl, settings.pixelSize, settings.threshold, settings.mode]);
+  }, [previewUrl, settings.size, settings.threshold, settings.mode]);
 
   // Handle conversion
-  const handleConvert = async (format: 'svg' | 'png' | 'jpg') => {
+  const handleConvert = async () => {
     if (!uploadedFile) {
       toast.error('Please upload an image first');
       return;
@@ -114,14 +137,16 @@ const Editor: React.FC = () => {
     setProcessing(true);
 
     try {
+      const maxDimension = isPro ? 10000 : 4096;
       const response = await api.convertImage(uploadedFile, {
         settings,
-        format,
+        format: exportFormat,
+        maxWidth: maxDimension,
       });
 
       if (response.fileData) {
         setOutputData(response.fileData);
-        toast.success(`Converted to ${format.toUpperCase()}!`);
+        toast.success(`Converted to ${exportFormat.toUpperCase()}!`);
       } else if (response.downloadUrl) {
         // Download from server
         window.open(response.downloadUrl, '_blank');
@@ -130,6 +155,7 @@ const Editor: React.FC = () => {
 
       // Update user credits
       if (user && !isPro) {
+        await refreshUser();
         toast.success(`${response.creditsRemaining} credits remaining`);
       }
     } catch (error: any) {
@@ -151,7 +177,8 @@ const Editor: React.FC = () => {
   const handleDownload = () => {
     if (!outputData) return;
 
-    const ext = outputData.startsWith('data:image/svg') ? 'svg' : 'png';
+    const ext = outputData.startsWith('data:image/svg') ? 'svg' :
+                 outputData.startsWith('data:image/png') ? 'png' : 'jpg';
     downloadFile(outputData, `pixelated-${Date.now()}.${ext}`);
     toast.success('Downloaded!');
   };
@@ -168,7 +195,7 @@ const Editor: React.FC = () => {
           {user && (
             <p className="mt-2 text-sm text-gray-500">
               {isPro ? (
-                <span className="text-primary-600 font-semibold">PRO</span>
+                <span className="text-primary-600 font-semibold">PRO - Unlimited</span>
               ) : (
                 <span>{user.credits} credits remaining</span>
               )}
@@ -176,9 +203,9 @@ const Editor: React.FC = () => {
           )}
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Left: Upload & Preview */}
-          <div className="space-y-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left: Upload & Preview (2/3 width) */}
+          <div className="lg:col-span-2 space-y-4">
             {/* Upload Area */}
             {!uploadedFile ? (
               <div
@@ -202,36 +229,41 @@ const Editor: React.FC = () => {
               <div className="space-y-4">
                 <div className="bg-white rounded-lg p-4 shadow">
                   <div className="flex items-center justify-between mb-2">
-                    <p className="font-medium text-gray-900">{uploadedFile.name}</p>
+                    <div>
+                      <p className="font-medium text-gray-900">{uploadedFile.name}</p>
+                      <p className="text-sm text-gray-500">{formatFileSize(uploadedFile.size)}</p>
+                    </div>
                     <button
                       onClick={() => {
                         setUploadedFile(null);
                         setPreviewUrl(null);
                         setOutputData(null);
                       }}
-                      className="text-sm text-red-600 hover:text-red-700"
+                      className="text-sm text-red-600 hover:text-red-700 px-3 py-1 rounded border border-red-300 hover:border-red-400"
                     >
                       Remove
                     </button>
                   </div>
-                  <p className="text-sm text-gray-500">{formatFileSize(uploadedFile.size)}</p>
                 </div>
 
                 {/* Canvas Preview */}
                 <div className="bg-white rounded-lg p-4 shadow">
-                  <h3 className="font-medium text-gray-900 mb-2">Preview</h3>
-                  <canvas
-                    ref={canvasRef}
-                    className="w-full border border-gray-200 rounded"
-                    style={{ imageRendering: 'pixelated' }}
-                  />
+                  <h3 className="font-medium text-gray-900 mb-3">Preview</h3>
+                  <div className="flex items-center justify-center bg-gray-100 rounded p-4">
+                    <canvas
+                      ref={canvasRef}
+                      className="max-w-full h-auto"
+                      style={{ imageRendering: 'pixelated' }}
+                    />
+                  </div>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Right: Controls */}
+          {/* Right: Controls (1/3 width) */}
           <div className="space-y-4">
+            {/* Settings Panel */}
             <div className="bg-white rounded-lg p-6 shadow">
               <div className="flex items-center gap-2 mb-4">
                 <Settings className="w-5 h-5" />
@@ -239,7 +271,7 @@ const Editor: React.FC = () => {
               </div>
 
               <div className="space-y-6">
-                {/* Mode */}
+                {/* Mode Toggle */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Mode</label>
                   <div className="flex gap-2">
@@ -261,32 +293,34 @@ const Editor: React.FC = () => {
                           toast.error('Color mode requires PRO subscription');
                         }
                       }}
-                      className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors ${
+                      className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-1 ${
                         settings.mode === 'color'
                           ? 'bg-primary-600 text-white'
                           : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                       } ${!isPro && 'opacity-50 cursor-not-allowed'}`}
                     >
-                      Color {!isPro && '🔒'}
+                      {!isPro && <Lock className="w-4 h-4" />}
+                      Color
                     </button>
                   </div>
                 </div>
 
-                {/* Pixel Size */}
+                {/* Size Slider */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Pixel Size: {settings.pixelSize}px
+                    Size: {settings.size} blocks
                   </label>
                   <input
                     type="range"
-                    min="1"
-                    max="50"
-                    value={settings.pixelSize}
+                    min="10"
+                    max="200"
+                    value={settings.size}
                     onChange={(e) =>
-                      setSettings({ ...settings, pixelSize: parseInt(e.target.value) })
+                      setSettings({ ...settings, size: parseInt(e.target.value) })
                     }
                     className="w-full"
                   />
+                  <p className="text-xs text-gray-500 mt-1">Blocks per shorter side</p>
                 </div>
 
                 {/* Threshold (B&W mode) */}
@@ -305,6 +339,7 @@ const Editor: React.FC = () => {
                       }
                       className="w-full"
                     />
+                    <p className="text-xs text-gray-500 mt-1">Dark vs light pixel balance</p>
                   </div>
                 )}
 
@@ -313,12 +348,12 @@ const Editor: React.FC = () => {
                   <>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Palette Size: {settings.paletteSize || 16}
+                        Palette Size: {settings.paletteSize || 16} colors
                       </label>
                       <input
                         type="range"
                         min="2"
-                        max="64"
+                        max="256"
                         value={settings.paletteSize || 16}
                         onChange={(e) =>
                           setSettings({ ...settings, paletteSize: parseInt(e.target.value) })
@@ -336,61 +371,97 @@ const Editor: React.FC = () => {
                         onChange={(e) =>
                           setSettings({
                             ...settings,
-                            dithering: e.target.value as any,
+                            dithering: e.target.value as DitheringMethod,
                           })
                         }
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
                       >
-                        <option value="none">None</option>
-                        <option value="floyd-steinberg">Floyd-Steinberg</option>
-                        <option value="atkinson">Atkinson</option>
-                        <option value="ordered">Ordered</option>
+                        {DITHERING_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
                       </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Blur: {settings.blur || 0}
+                      </label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="10"
+                        value={settings.blur || 0}
+                        onChange={(e) =>
+                          setSettings({ ...settings, blur: parseInt(e.target.value) })
+                        }
+                        className="w-full"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">Smoothing before processing</p>
                     </div>
                   </>
                 )}
               </div>
             </div>
 
-            {/* Export */}
+            {/* Export Panel */}
             <div className="bg-white rounded-lg p-6 shadow">
               <div className="flex items-center gap-2 mb-4">
                 <Download className="w-5 h-5" />
                 <h2 className="text-xl font-semibold">Export</h2>
               </div>
 
-              <div className="grid grid-cols-3 gap-2">
-                <button
-                  onClick={() => handleConvert('svg')}
-                  disabled={!uploadedFile || processing}
-                  className="py-3 px-4 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {processing ? <Loader className="w-5 h-5 animate-spin mx-auto" /> : 'SVG'}
-                </button>
-                <button
-                  onClick={() => handleConvert('png')}
-                  disabled={!uploadedFile || processing}
-                  className="py-3 px-4 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {processing ? <Loader className="w-5 h-5 animate-spin mx-auto" /> : 'PNG'}
-                </button>
-                <button
-                  onClick={() => handleConvert('jpg')}
-                  disabled={!uploadedFile || processing}
-                  className="py-3 px-4 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {processing ? <Loader className="w-5 h-5 animate-spin mx-auto" /> : 'JPG'}
-                </button>
-              </div>
+              <div className="space-y-4">
+                {/* Format Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Format</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['svg', 'png', 'jpg'] as const).map((format) => (
+                      <button
+                        key={format}
+                        onClick={() => setExportFormat(format)}
+                        className={`py-2 px-3 rounded-lg font-medium transition-colors ${
+                          exportFormat === format
+                            ? 'bg-primary-600 text-white'
+                            : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                        }`}
+                      >
+                        {format.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
-              {outputData && (
+                {/* Convert Button */}
                 <button
-                  onClick={handleDownload}
-                  className="mt-4 w-full py-3 px-4 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors"
+                  onClick={handleConvert}
+                  disabled={!uploadedFile || processing}
+                  className="w-full py-3 px-4 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
                 >
-                  Download Result
+                  {processing ? (
+                    <>
+                      <Loader className="w-5 h-5 animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      Convert to {exportFormat.toUpperCase()}
+                    </>
+                  )}
                 </button>
-              )}
+
+                {/* Download Button */}
+                {outputData && (
+                  <button
+                    onClick={handleDownload}
+                    className="w-full py-3 px-4 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Download className="w-5 h-5" />
+                    Download Result
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

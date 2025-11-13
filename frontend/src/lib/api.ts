@@ -85,14 +85,23 @@ class ApiClient {
   async convertImage(file: File, request: ConversionRequest): Promise<ConversionResponse> {
     const formData = new FormData();
     formData.append('image', file);
-    formData.append('pixelSize', request.settings.pixelSize.toString());
+    formData.append('size', request.settings.size.toString());
     formData.append('threshold', request.settings.threshold.toString());
     formData.append('mode', request.settings.mode);
     formData.append('format', request.format);
 
+    if (request.maxWidth) {
+      formData.append('maxDimension', request.maxWidth.toString());
+    } else if (request.maxHeight) {
+      formData.append('maxDimension', request.maxHeight.toString());
+    }
+
     if (request.settings.mode === 'color') {
       formData.append('paletteSize', (request.settings.paletteSize || 16).toString());
       formData.append('dithering', request.settings.dithering || 'floyd-steinberg');
+      if (request.settings.blur !== undefined) {
+        formData.append('blur', request.settings.blur.toString());
+      }
     }
 
     const { data } = await this.client.post('/conversion/convert', formData, {

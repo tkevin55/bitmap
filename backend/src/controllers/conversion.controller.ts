@@ -7,7 +7,7 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import imageProcessor from '../services/imageProcessor.service';
 import svgGenerator from '../services/svgGenerator.service';
 import authService from '../services/auth.service';
-import { ConversionSettings } from '../../../shared/types';
+import { ConversionSettings, DitheringMethod } from '../../../shared/types';
 import logger from '../utils/logger';
 import config from '../config';
 
@@ -26,20 +26,24 @@ export class ConversionController {
         return;
       }
 
+      const isPro = req.user?.isPro || false;
+
       // Parse settings from request body
       const settings: ConversionSettings = {
-        pixelSize: parseInt(req.body.pixelSize) || 10,
+        size: parseInt(req.body.size) || 50,
         threshold: parseInt(req.body.threshold) || 128,
         mode: req.body.mode || 'bw',
         paletteSize: parseInt(req.body.paletteSize) || 16,
-        dithering: req.body.dithering || 'floyd-steinberg',
+        dithering: (req.body.dithering || 'floyd-steinberg') as DitheringMethod,
+        blur: parseInt(req.body.blur) || 0,
       };
 
       const format = (req.body.format || 'svg') as 'svg' | 'png' | 'jpg';
+      const maxDimension = req.body.maxDimension ? parseInt(req.body.maxDimension) : undefined;
 
       // Validate settings
-      if (settings.pixelSize < 1 || settings.pixelSize > 50) {
-        res.status(400).json({ message: 'Pixel size must be between 1 and 50' });
+      if (settings.size < 10 || settings.size > 200) {
+        res.status(400).json({ message: 'Size must be between 10 and 200' });
         return;
       }
 
@@ -49,7 +53,7 @@ export class ConversionController {
       }
 
       // Check if color mode requires PRO
-      if (settings.mode === 'color' && !req.user?.isPro) {
+      if (settings.mode === 'color' && !isPro) {
         res.status(403).json({
           message: 'Color mode requires PRO subscription',
           code: 'PRO_REQUIRED',
@@ -57,10 +61,27 @@ export class ConversionController {
         return;
       }
 
+      // Check if high-res export requires PRO
+      if (maxDimension && maxDimension > 4096 && !isPro) {
+        res.status(403).json({
+          message: 'High-resolution export requires PRO subscription',
+          code: 'PRO_REQUIRED',
+        });
+        return;
+      }
+
+      // Apply PRO limits for maxDimension
+      const effectiveMaxDimension = maxDimension
+        ? isPro
+          ? Math.min(maxDimension, 10000)
+          : Math.min(maxDimension, 4096)
+        : undefined;
+
       logger.info('Processing conversion', {
         userId: req.user?.userId,
         settings,
         format,
+        maxDimension: effectiveMaxDimension,
         fileSize: req.file.size,
       });
 
@@ -73,9 +94,15 @@ export class ConversionController {
       const outputPath = path.join(config.upload.outputDir, outputFileName);
 
       if (format === 'svg') {
-        await svgGenerator.generateSVG(imageData, settings, outputPath);
+        await svgGenerator.generateSVG(imageData, settings, outputPath, effectiveMaxDimension);
       } else {
-        await imageProcessor.generateRasterOutput(imageData, settings, format, outputPath);
+        await imageProcessor.generateRasterOutput(
+          imageData,
+          settings,
+          format,
+          outputPath,
+          effectiveMaxDimension
+        );
       }
 
       // Get output file size

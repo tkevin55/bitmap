@@ -1,10 +1,12 @@
 import sharp from 'sharp';
-import { ConversionSettings } from '../../../shared/types';
+import { ConversionSettings, DitheringMethod } from '../../../shared/types';
 import logger from '../utils/logger';
 
 export interface ProcessedImageData {
   width: number;
   height: number;
+  gridWidth: number;
+  gridHeight: number;
   pixelGrid: PixelData[][];
   palette?: string[];
 }
@@ -29,18 +31,36 @@ export class ImageProcessorService {
 
     try {
       // Load and get metadata
-      const image = sharp(inputPath);
+      let image = sharp(inputPath);
       const metadata = await image.metadata();
 
       if (!metadata.width || !metadata.height) {
         throw new Error('Unable to read image dimensions');
       }
 
-      // Calculate grid dimensions
-      const gridWidth = Math.ceil(metadata.width / settings.pixelSize);
-      const gridHeight = Math.ceil(metadata.height / settings.pixelSize);
+      // Apply blur if specified (color mode)
+      if (settings.mode === 'color' && settings.blur && settings.blur > 0) {
+        image = image.blur(settings.blur);
+      }
 
-      logger.debug(`Grid dimensions: ${gridWidth}x${gridHeight}`);
+      // Calculate grid dimensions based on size (blocks per shorter side)
+      const shorterSide = Math.min(metadata.width, metadata.height);
+      const longerSide = Math.max(metadata.width, metadata.height);
+      const aspectRatio = longerSide / shorterSide;
+
+      let gridWidth: number, gridHeight: number;
+
+      if (metadata.width <= metadata.height) {
+        // Portrait or square
+        gridWidth = settings.size;
+        gridHeight = Math.round(settings.size * aspectRatio);
+      } else {
+        // Landscape
+        gridWidth = Math.round(settings.size * aspectRatio);
+        gridHeight = settings.size;
+      }
+
+      logger.debug(`Grid dimensions: ${gridWidth}x${gridHeight} (size=${settings.size})`);
 
       // Resize image to grid dimensions (downsampling)
       const resized = await image
@@ -107,6 +127,8 @@ export class ImageProcessorService {
       return {
         width: metadata.width,
         height: metadata.height,
+        gridWidth,
+        gridHeight,
         pixelGrid,
         palette,
       };
@@ -124,7 +146,7 @@ export class ImageProcessorService {
     settings: ConversionSettings
   ): Promise<{ pixelGrid: PixelData[][]; palette: string[] }> {
     const paletteSize = settings.paletteSize || 16;
-    const dithering = settings.dithering || 'none';
+    const dithering = settings.dithering || 'floyd-steinberg';
 
     // Extract palette using median cut algorithm or use custom palette
     let palette: string[];
@@ -139,7 +161,7 @@ export class ImageProcessorService {
       pixelGrid = this.applyDithering(pixelGrid, palette, dithering);
     } else {
       // Just snap to nearest color
-      pixelGrid = this.snapTopalette(pixelGrid, palette);
+      pixelGrid = this.snapToPalette(pixelGrid, palette);
     }
 
     return { pixelGrid, palette };
@@ -175,7 +197,7 @@ export class ImageProcessorService {
   /**
    * Snap pixels to nearest palette color
    */
-  private snapTopalette(pixelGrid: PixelData[][], palette: string[]): PixelData[][] {
+  private snapToPalette(pixelGrid: PixelData[][], palette: string[]): PixelData[][] {
     const paletteRGB = palette.map((hex) => this.hexToRgb(hex));
 
     return pixelGrid.map((row) =>
@@ -190,12 +212,12 @@ export class ImageProcessorService {
   }
 
   /**
-   * Apply Floyd-Steinberg dithering
+   * Apply dithering algorithm
    */
   private applyDithering(
     pixelGrid: PixelData[][],
     palette: string[],
-    algorithm: string
+    algorithm: DitheringMethod
   ): PixelData[][] {
     const paletteRGB = palette.map((hex) => this.hexToRgb(hex));
     const height = pixelGrid.length;
@@ -206,77 +228,364 @@ export class ImageProcessorService {
       row.map((p) => ({ r: p.r, g: p.g, b: p.b }))
     );
 
-    if (algorithm === 'floyd-steinberg') {
-      // Floyd-Steinberg dithering
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const oldPixel = workingGrid[y][x];
-          const newPixel = this.findNearestColor(oldPixel, paletteRGB);
+    switch (algorithm) {
+      case 'floyd-steinberg':
+        return this.floydSteinbergDither(workingGrid, paletteRGB);
+      case 'atkinson':
+        return this.atkinsonDither(workingGrid, paletteRGB);
+      case 'jarvis-judice-ninke':
+        return this.jarvisJudiceNinkeDither(workingGrid, paletteRGB);
+      case 'stucki':
+        return this.stuckiDither(workingGrid, paletteRGB);
+      case 'bayer-2x2':
+        return this.bayerDither(workingGrid, paletteRGB, 2);
+      case 'bayer-4x4':
+        return this.bayerDither(workingGrid, paletteRGB, 4);
+      case 'bayer-8x8':
+        return this.bayerDither(workingGrid, paletteRGB, 8);
+      case 'clustered-4x4':
+        return this.clusteredDither(workingGrid, paletteRGB);
+      case 'random':
+        return this.randomDither(workingGrid, paletteRGB);
+      default:
+        return this.snapToPalette(pixelGrid, palette);
+    }
+  }
 
-          workingGrid[y][x] = newPixel;
+  /**
+   * Floyd-Steinberg dithering
+   */
+  private floydSteinbergDither(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    paletteRGB: Array<{ r: number; g: number; b: number }>
+  ): PixelData[][] {
+    const height = workingGrid.length;
+    const width = workingGrid[0].length;
 
-          const errR = oldPixel.r - newPixel.r;
-          const errG = oldPixel.g - newPixel.g;
-          const errB = oldPixel.b - newPixel.b;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const oldPixel = workingGrid[y][x];
+        const newPixel = this.findNearestColor(oldPixel, paletteRGB);
 
-          // Distribute error to neighboring pixels
-          if (x + 1 < width) {
-            workingGrid[y][x + 1].r += (errR * 7) / 16;
-            workingGrid[y][x + 1].g += (errG * 7) / 16;
-            workingGrid[y][x + 1].b += (errB * 7) / 16;
-          }
-          if (y + 1 < height) {
-            if (x > 0) {
-              workingGrid[y + 1][x - 1].r += (errR * 3) / 16;
-              workingGrid[y + 1][x - 1].g += (errG * 3) / 16;
-              workingGrid[y + 1][x - 1].b += (errB * 3) / 16;
-            }
-            workingGrid[y + 1][x].r += (errR * 5) / 16;
-            workingGrid[y + 1][x].g += (errG * 5) / 16;
-            workingGrid[y + 1][x].b += (errB * 5) / 16;
-            if (x + 1 < width) {
-              workingGrid[y + 1][x + 1].r += (errR * 1) / 16;
-              workingGrid[y + 1][x + 1].g += (errG * 1) / 16;
-              workingGrid[y + 1][x + 1].b += (errB * 1) / 16;
-            }
-          }
+        workingGrid[y][x] = newPixel;
+
+        const errR = oldPixel.r - newPixel.r;
+        const errG = oldPixel.g - newPixel.g;
+        const errB = oldPixel.b - newPixel.b;
+
+        // Distribute error to neighboring pixels
+        if (x + 1 < width) {
+          workingGrid[y][x + 1].r += (errR * 7) / 16;
+          workingGrid[y][x + 1].g += (errG * 7) / 16;
+          workingGrid[y][x + 1].b += (errB * 7) / 16;
         }
-      }
-    } else if (algorithm === 'atkinson') {
-      // Atkinson dithering
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const oldPixel = workingGrid[y][x];
-          const newPixel = this.findNearestColor(oldPixel, paletteRGB);
-
-          workingGrid[y][x] = newPixel;
-
-          const errR = (oldPixel.r - newPixel.r) / 8;
-          const errG = (oldPixel.g - newPixel.g) / 8;
-          const errB = (oldPixel.b - newPixel.b) / 8;
-
-          // Atkinson dithering pattern
-          const distributeError = (dx: number, dy: number) => {
-            const nx = x + dx;
-            const ny = y + dy;
-            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-              workingGrid[ny][nx].r += errR;
-              workingGrid[ny][nx].g += errG;
-              workingGrid[ny][nx].b += errB;
-            }
-          };
-
-          distributeError(1, 0);
-          distributeError(2, 0);
-          distributeError(-1, 1);
-          distributeError(0, 1);
-          distributeError(1, 1);
-          distributeError(0, 2);
+        if (y + 1 < height) {
+          if (x > 0) {
+            workingGrid[y + 1][x - 1].r += (errR * 3) / 16;
+            workingGrid[y + 1][x - 1].g += (errG * 3) / 16;
+            workingGrid[y + 1][x - 1].b += (errB * 3) / 16;
+          }
+          workingGrid[y + 1][x].r += (errR * 5) / 16;
+          workingGrid[y + 1][x].g += (errG * 5) / 16;
+          workingGrid[y + 1][x].b += (errB * 5) / 16;
+          if (x + 1 < width) {
+            workingGrid[y + 1][x + 1].r += (errR * 1) / 16;
+            workingGrid[y + 1][x + 1].g += (errG * 1) / 16;
+            workingGrid[y + 1][x + 1].b += (errB * 1) / 16;
+          }
         }
       }
     }
 
-    // Clamp values and convert back to PixelData
+    return this.clampAndConvert(workingGrid);
+  }
+
+  /**
+   * Atkinson dithering
+   */
+  private atkinsonDither(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    paletteRGB: Array<{ r: number; g: number; b: number }>
+  ): PixelData[][] {
+    const height = workingGrid.length;
+    const width = workingGrid[0].length;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const oldPixel = workingGrid[y][x];
+        const newPixel = this.findNearestColor(oldPixel, paletteRGB);
+
+        workingGrid[y][x] = newPixel;
+
+        const errR = (oldPixel.r - newPixel.r) / 8;
+        const errG = (oldPixel.g - newPixel.g) / 8;
+        const errB = (oldPixel.b - newPixel.b) / 8;
+
+        // Atkinson dithering pattern
+        const distributeError = (dx: number, dy: number) => {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+            workingGrid[ny][nx].r += errR;
+            workingGrid[ny][nx].g += errG;
+            workingGrid[ny][nx].b += errB;
+          }
+        };
+
+        distributeError(1, 0);
+        distributeError(2, 0);
+        distributeError(-1, 1);
+        distributeError(0, 1);
+        distributeError(1, 1);
+        distributeError(0, 2);
+      }
+    }
+
+    return this.clampAndConvert(workingGrid);
+  }
+
+  /**
+   * Jarvis-Judice-Ninke dithering
+   */
+  private jarvisJudiceNinkeDither(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    paletteRGB: Array<{ r: number; g: number; b: number }>
+  ): PixelData[][] {
+    const height = workingGrid.length;
+    const width = workingGrid[0].length;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const oldPixel = workingGrid[y][x];
+        const newPixel = this.findNearestColor(oldPixel, paletteRGB);
+
+        workingGrid[y][x] = newPixel;
+
+        const errR = oldPixel.r - newPixel.r;
+        const errG = oldPixel.g - newPixel.g;
+        const errB = oldPixel.b - newPixel.b;
+
+        // JJN dithering pattern
+        const distributeError = (dx: number, dy: number, factor: number) => {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+            workingGrid[ny][nx].r += (errR * factor) / 48;
+            workingGrid[ny][nx].g += (errG * factor) / 48;
+            workingGrid[ny][nx].b += (errB * factor) / 48;
+          }
+        };
+
+        distributeError(1, 0, 7);
+        distributeError(2, 0, 5);
+        distributeError(-2, 1, 3);
+        distributeError(-1, 1, 5);
+        distributeError(0, 1, 7);
+        distributeError(1, 1, 5);
+        distributeError(2, 1, 3);
+        distributeError(-2, 2, 1);
+        distributeError(-1, 2, 3);
+        distributeError(0, 2, 5);
+        distributeError(1, 2, 3);
+        distributeError(2, 2, 1);
+      }
+    }
+
+    return this.clampAndConvert(workingGrid);
+  }
+
+  /**
+   * Stucki dithering
+   */
+  private stuckiDither(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    paletteRGB: Array<{ r: number; g: number; b: number }>
+  ): PixelData[][] {
+    const height = workingGrid.length;
+    const width = workingGrid[0].length;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const oldPixel = workingGrid[y][x];
+        const newPixel = this.findNearestColor(oldPixel, paletteRGB);
+
+        workingGrid[y][x] = newPixel;
+
+        const errR = oldPixel.r - newPixel.r;
+        const errG = oldPixel.g - newPixel.g;
+        const errB = oldPixel.b - newPixel.b;
+
+        // Stucki dithering pattern
+        const distributeError = (dx: number, dy: number, factor: number) => {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+            workingGrid[ny][nx].r += (errR * factor) / 42;
+            workingGrid[ny][nx].g += (errG * factor) / 42;
+            workingGrid[ny][nx].b += (errB * factor) / 42;
+          }
+        };
+
+        distributeError(1, 0, 8);
+        distributeError(2, 0, 4);
+        distributeError(-2, 1, 2);
+        distributeError(-1, 1, 4);
+        distributeError(0, 1, 8);
+        distributeError(1, 1, 4);
+        distributeError(2, 1, 2);
+        distributeError(-2, 2, 1);
+        distributeError(-1, 2, 2);
+        distributeError(0, 2, 4);
+        distributeError(1, 2, 2);
+        distributeError(2, 2, 1);
+      }
+    }
+
+    return this.clampAndConvert(workingGrid);
+  }
+
+  /**
+   * Bayer matrix dithering
+   */
+  private bayerDither(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    paletteRGB: Array<{ r: number; g: number; b: number }>,
+    matrixSize: number
+  ): PixelData[][] {
+    const bayerMatrix2 = [
+      [0, 2],
+      [3, 1],
+    ];
+
+    const bayerMatrix4 = [
+      [0, 8, 2, 10],
+      [12, 4, 14, 6],
+      [3, 11, 1, 9],
+      [15, 7, 13, 5],
+    ];
+
+    const bayerMatrix8 = [
+      [0, 32, 8, 40, 2, 34, 10, 42],
+      [48, 16, 56, 24, 50, 18, 58, 26],
+      [12, 44, 4, 36, 14, 46, 6, 38],
+      [60, 28, 52, 20, 62, 30, 54, 22],
+      [3, 35, 11, 43, 1, 33, 9, 41],
+      [51, 19, 59, 27, 49, 17, 57, 25],
+      [15, 47, 7, 39, 13, 45, 5, 37],
+      [63, 31, 55, 23, 61, 29, 53, 21],
+    ];
+
+    let matrix: number[][];
+    let divisor: number;
+
+    switch (matrixSize) {
+      case 2:
+        matrix = bayerMatrix2;
+        divisor = 4;
+        break;
+      case 4:
+        matrix = bayerMatrix4;
+        divisor = 16;
+        break;
+      case 8:
+        matrix = bayerMatrix8;
+        divisor = 64;
+        break;
+      default:
+        matrix = bayerMatrix4;
+        divisor = 16;
+    }
+
+    const height = workingGrid.length;
+    const width = workingGrid[0].length;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const threshold = (matrix[y % matrixSize][x % matrixSize] / divisor - 0.5) * 128;
+
+        const pixel = workingGrid[y][x];
+        const adjusted = {
+          r: Math.max(0, Math.min(255, pixel.r + threshold)),
+          g: Math.max(0, Math.min(255, pixel.g + threshold)),
+          b: Math.max(0, Math.min(255, pixel.b + threshold)),
+        };
+
+        workingGrid[y][x] = this.findNearestColor(adjusted, paletteRGB);
+      }
+    }
+
+    return this.clampAndConvert(workingGrid);
+  }
+
+  /**
+   * Clustered dot dithering
+   */
+  private clusteredDither(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    paletteRGB: Array<{ r: number; g: number; b: number }>
+  ): PixelData[][] {
+    const clusteredMatrix = [
+      [12, 5, 6, 13],
+      [4, 0, 1, 7],
+      [11, 3, 2, 8],
+      [15, 10, 9, 14],
+    ];
+
+    const height = workingGrid.length;
+    const width = workingGrid[0].length;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const threshold = (clusteredMatrix[y % 4][x % 4] / 16 - 0.5) * 128;
+
+        const pixel = workingGrid[y][x];
+        const adjusted = {
+          r: Math.max(0, Math.min(255, pixel.r + threshold)),
+          g: Math.max(0, Math.min(255, pixel.g + threshold)),
+          b: Math.max(0, Math.min(255, pixel.b + threshold)),
+        };
+
+        workingGrid[y][x] = this.findNearestColor(adjusted, paletteRGB);
+      }
+    }
+
+    return this.clampAndConvert(workingGrid);
+  }
+
+  /**
+   * Random dithering
+   */
+  private randomDither(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>,
+    paletteRGB: Array<{ r: number; g: number; b: number }>
+  ): PixelData[][] {
+    const height = workingGrid.length;
+    const width = workingGrid[0].length;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const noise = (Math.random() - 0.5) * 64;
+
+        const pixel = workingGrid[y][x];
+        const adjusted = {
+          r: Math.max(0, Math.min(255, pixel.r + noise)),
+          g: Math.max(0, Math.min(255, pixel.g + noise)),
+          b: Math.max(0, Math.min(255, pixel.b + noise)),
+        };
+
+        workingGrid[y][x] = this.findNearestColor(adjusted, paletteRGB);
+      }
+    }
+
+    return this.clampAndConvert(workingGrid);
+  }
+
+  /**
+   * Clamp values and convert to PixelData
+   */
+  private clampAndConvert(
+    workingGrid: Array<Array<{ r: number; g: number; b: number }>>
+  ): PixelData[][] {
     return workingGrid.map((row) =>
       row.map((p) => {
         const r = Math.max(0, Math.min(255, Math.round(p.r)));
@@ -350,15 +659,30 @@ export class ImageProcessorService {
    * Generate a high-resolution PNG/JPG from pixel grid
    */
   async generateRasterOutput(
-    pixelGrid: PixelData[][],
+    imageData: ProcessedImageData,
     settings: ConversionSettings,
     format: 'png' | 'jpg',
-    outputPath: string
+    outputPath: string,
+    maxDimension?: number
   ): Promise<void> {
-    const gridHeight = pixelGrid.length;
-    const gridWidth = pixelGrid[0].length;
-    const outputWidth = gridWidth * settings.pixelSize;
-    const outputHeight = gridHeight * settings.pixelSize;
+    const { pixelGrid, gridWidth, gridHeight, width: originalWidth, height: originalHeight } = imageData;
+
+    // Calculate output dimensions
+    let outputWidth: number, outputHeight: number;
+
+    if (maxDimension) {
+      const shorterSide = Math.min(originalWidth, originalHeight);
+      const scale = maxDimension / shorterSide;
+      outputWidth = Math.round(originalWidth * scale);
+      outputHeight = Math.round(originalHeight * scale);
+    } else {
+      outputWidth = originalWidth;
+      outputHeight = originalHeight;
+    }
+
+    // Calculate pixel block size
+    const blockWidth = Math.ceil(outputWidth / gridWidth);
+    const blockHeight = Math.ceil(outputHeight / gridHeight);
 
     logger.info(`Generating ${format.toUpperCase()} output: ${outputWidth}x${outputHeight}`);
 
@@ -371,10 +695,10 @@ export class ImageProcessorService {
         const pixel = pixelGrid[gy][gx];
 
         // Fill the pixel block
-        for (let py = 0; py < settings.pixelSize; py++) {
-          for (let px = 0; px < settings.pixelSize; px++) {
-            const y = gy * settings.pixelSize + py;
-            const x = gx * settings.pixelSize + px;
+        for (let py = 0; py < blockHeight; py++) {
+          for (let px = 0; px < blockWidth; px++) {
+            const y = gy * blockHeight + py;
+            const x = gx * blockWidth + px;
 
             if (y < outputHeight && x < outputWidth) {
               const idx = (y * outputWidth + x) * channels;

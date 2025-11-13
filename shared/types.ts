@@ -1,13 +1,27 @@
 // Shared types between frontend and backend
 
+export type DitheringMethod =
+  | 'none'
+  | 'floyd-steinberg'
+  | 'atkinson'
+  | 'jarvis-judice-ninke'
+  | 'stucki'
+  | 'bayer-2x2'
+  | 'bayer-4x4'
+  | 'bayer-8x8'
+  | 'clustered-4x4'
+  | 'random';
+
 export interface ConversionSettings {
-  pixelSize: number; // 1-50
+  size: number; // Blocks per shorter side (10-200)
   threshold: number; // 0-255 for B&W mode
   mode: 'bw' | 'color';
   // Color mode settings
-  paletteSize?: number; // 2-64
-  dithering?: 'none' | 'floyd-steinberg' | 'ordered' | 'atkinson';
+  paletteSize?: number; // 2-256
+  dithering?: DitheringMethod;
   customPalette?: string[]; // Array of hex colors
+  paletteUrl?: string; // URL to import palette from
+  blur?: number; // Blur amount (0-10)
 }
 
 export interface ConversionRequest {
@@ -126,11 +140,12 @@ export const FILE_LIMITS = {
 };
 
 export const DEFAULT_SETTINGS: ConversionSettings = {
-  pixelSize: 10,
+  size: 50, // 50 blocks per shorter side
   threshold: 128,
   mode: 'bw',
   paletteSize: 16,
   dithering: 'floyd-steinberg',
+  blur: 0,
 };
 
 export interface ApiError {

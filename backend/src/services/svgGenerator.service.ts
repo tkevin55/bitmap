@@ -10,25 +10,39 @@ export class SVGGeneratorService {
   async generateSVG(
     imageData: ProcessedImageData,
     settings: ConversionSettings,
-    outputPath: string
+    outputPath: string,
+    maxDimension?: number
   ): Promise<void> {
     const startTime = Date.now();
     logger.info('Generating SVG output');
 
-    const { pixelGrid, palette } = imageData;
-    const gridHeight = pixelGrid.length;
-    const gridWidth = pixelGrid[0].length;
-    const svgWidth = gridWidth * settings.pixelSize;
-    const svgHeight = gridHeight * settings.pixelSize;
+    const { pixelGrid, palette, gridWidth, gridHeight, width, height } = imageData;
+
+    // Calculate SVG dimensions
+    let svgWidth: number, svgHeight: number;
+
+    if (maxDimension) {
+      const shorterSide = Math.min(width, height);
+      const scale = maxDimension / shorterSide;
+      svgWidth = Math.round(width * scale);
+      svgHeight = Math.round(height * scale);
+    } else {
+      svgWidth = width;
+      svgHeight = height;
+    }
+
+    // Calculate block size
+    const blockWidth = svgWidth / gridWidth;
+    const blockHeight = svgHeight / gridHeight;
 
     let svgContent = this.generateSVGHeader(svgWidth, svgHeight);
 
     if (settings.mode === 'color' && palette) {
       // Group rectangles by color for easier editing in vector software
-      svgContent += this.generateGroupedColorSVG(pixelGrid, settings, palette);
+      svgContent += this.generateGroupedColorSVG(pixelGrid, blockWidth, blockHeight, palette);
     } else {
       // Simple B&W output
-      svgContent += this.generateSimpleSVG(pixelGrid, settings);
+      svgContent += this.generateSimpleSVG(pixelGrid, blockWidth, blockHeight);
     }
 
     svgContent += '</svg>';
@@ -57,7 +71,11 @@ export class SVGGeneratorService {
   /**
    * Generate simple SVG (for B&W mode or ungrouped color)
    */
-  private generateSimpleSVG(pixelGrid: PixelData[][], settings: ConversionSettings): string {
+  private generateSimpleSVG(
+    pixelGrid: PixelData[][],
+    blockWidth: number,
+    blockHeight: number
+  ): string {
     let content = '  <g id="pixels">\n';
 
     for (let y = 0; y < pixelGrid.length; y++) {
@@ -65,14 +83,14 @@ export class SVGGeneratorService {
         const pixel = pixelGrid[y][x];
 
         // Skip white pixels in B&W mode to reduce file size
-        if (settings.mode === 'bw' && pixel.hex === '#ffffff') {
+        if (pixel.hex === '#ffffff') {
           continue;
         }
 
-        const rectX = x * settings.pixelSize;
-        const rectY = y * settings.pixelSize;
+        const rectX = x * blockWidth;
+        const rectY = y * blockHeight;
 
-        content += `    <rect x="${rectX}" y="${rectY}" width="${settings.pixelSize}" height="${settings.pixelSize}" fill="${pixel.hex}"/>\n`;
+        content += `    <rect x="${rectX.toFixed(2)}" y="${rectY.toFixed(2)}" width="${blockWidth.toFixed(2)}" height="${blockHeight.toFixed(2)}" fill="${pixel.hex}"/>\n`;
       }
     }
 
@@ -85,7 +103,8 @@ export class SVGGeneratorService {
    */
   private generateGroupedColorSVG(
     pixelGrid: PixelData[][],
-    settings: ConversionSettings,
+    blockWidth: number,
+    blockHeight: number,
     palette: string[]
   ): string {
     let content = '';
@@ -100,10 +119,10 @@ export class SVGGeneratorService {
           const pixel = pixelGrid[y][x];
 
           if (pixel.hex.toLowerCase() === color.toLowerCase()) {
-            const rectX = x * settings.pixelSize;
-            const rectY = y * settings.pixelSize;
+            const rectX = x * blockWidth;
+            const rectY = y * blockHeight;
 
-            content += `    <rect x="${rectX}" y="${rectY}" width="${settings.pixelSize}" height="${settings.pixelSize}"/>\n`;
+            content += `    <rect x="${rectX.toFixed(2)}" y="${rectY.toFixed(2)}" width="${blockWidth.toFixed(2)}" height="${blockHeight.toFixed(2)}"/>\n`;
           }
         }
       }
@@ -120,23 +139,37 @@ export class SVGGeneratorService {
   async generateOptimizedSVG(
     imageData: ProcessedImageData,
     settings: ConversionSettings,
-    outputPath: string
+    outputPath: string,
+    maxDimension?: number
   ): Promise<void> {
     const startTime = Date.now();
     logger.info('Generating optimized SVG output');
 
-    const { pixelGrid, palette } = imageData;
-    const gridHeight = pixelGrid.length;
-    const gridWidth = pixelGrid[0].length;
-    const svgWidth = gridWidth * settings.pixelSize;
-    const svgHeight = gridHeight * settings.pixelSize;
+    const { pixelGrid, palette, gridWidth, gridHeight, width, height } = imageData;
+
+    // Calculate SVG dimensions
+    let svgWidth: number, svgHeight: number;
+
+    if (maxDimension) {
+      const shorterSide = Math.min(width, height);
+      const scale = maxDimension / shorterSide;
+      svgWidth = Math.round(width * scale);
+      svgHeight = Math.round(height * scale);
+    } else {
+      svgWidth = width;
+      svgHeight = height;
+    }
+
+    // Calculate block size
+    const blockWidth = svgWidth / gridWidth;
+    const blockHeight = svgHeight / gridHeight;
 
     let svgContent = this.generateSVGHeader(svgWidth, svgHeight);
 
     if (settings.mode === 'color' && palette) {
-      svgContent += this.generateOptimizedColorPaths(pixelGrid, settings, palette);
+      svgContent += this.generateOptimizedColorPaths(pixelGrid, blockWidth, blockHeight, palette);
     } else {
-      svgContent += this.generateOptimizedBWPaths(pixelGrid, settings);
+      svgContent += this.generateOptimizedBWPaths(pixelGrid, blockWidth, blockHeight);
     }
 
     svgContent += '</svg>';
@@ -150,9 +183,12 @@ export class SVGGeneratorService {
   /**
    * Generate optimized paths for B&W mode
    */
-  private generateOptimizedBWPaths(pixelGrid: PixelData[][], settings: ConversionSettings): string {
+  private generateOptimizedBWPaths(
+    pixelGrid: PixelData[][],
+    blockWidth: number,
+    blockHeight: number
+  ): string {
     let content = '  <g id="pixels">\n';
-    const pixelSize = settings.pixelSize;
 
     // Combine adjacent pixels of the same color into paths
     const visited = Array.from({ length: pixelGrid.length }, () =>
@@ -166,7 +202,7 @@ export class SVGGeneratorService {
         const pixel = pixelGrid[y][x];
 
         // Skip white pixels in B&W mode
-        if (settings.mode === 'bw' && pixel.hex === '#ffffff') {
+        if (pixel.hex === '#ffffff') {
           visited[y][x] = true;
           continue;
         }
@@ -186,11 +222,11 @@ export class SVGGeneratorService {
           visited[y][x + i] = true;
         }
 
-        const rectX = x * pixelSize;
-        const rectY = y * pixelSize;
-        const rectWidth = width * pixelSize;
+        const rectX = x * blockWidth;
+        const rectY = y * blockHeight;
+        const rectWidth = width * blockWidth;
 
-        content += `    <rect x="${rectX}" y="${rectY}" width="${rectWidth}" height="${pixelSize}" fill="${pixel.hex}"/>\n`;
+        content += `    <rect x="${rectX.toFixed(2)}" y="${rectY.toFixed(2)}" width="${rectWidth.toFixed(2)}" height="${blockHeight.toFixed(2)}" fill="${pixel.hex}"/>\n`;
       }
     }
 
@@ -203,11 +239,11 @@ export class SVGGeneratorService {
    */
   private generateOptimizedColorPaths(
     pixelGrid: PixelData[][],
-    settings: ConversionSettings,
+    blockWidth: number,
+    blockHeight: number,
     palette: string[]
   ): string {
     let content = '';
-    const pixelSize = settings.pixelSize;
 
     for (const color of palette) {
       content += `  <g id="color-${color.substring(1)}" fill="${color}">\n`;
@@ -237,11 +273,11 @@ export class SVGGeneratorService {
             visited[y][x + i] = true;
           }
 
-          const rectX = x * pixelSize;
-          const rectY = y * pixelSize;
-          const rectWidth = width * pixelSize;
+          const rectX = x * blockWidth;
+          const rectY = y * blockHeight;
+          const rectWidth = width * blockWidth;
 
-          content += `    <rect x="${rectX}" y="${rectY}" width="${rectWidth}" height="${pixelSize}"/>\n`;
+          content += `    <rect x="${rectX.toFixed(2)}" y="${rectY.toFixed(2)}" width="${rectWidth.toFixed(2)}" height="${blockHeight.toFixed(2)}"/>\n`;
         }
       }
 
@@ -256,20 +292,34 @@ export class SVGGeneratorService {
    */
   async getSVGString(
     imageData: ProcessedImageData,
-    settings: ConversionSettings
+    settings: ConversionSettings,
+    maxDimension?: number
   ): Promise<string> {
-    const { pixelGrid, palette } = imageData;
-    const gridHeight = pixelGrid.length;
-    const gridWidth = pixelGrid[0].length;
-    const svgWidth = gridWidth * settings.pixelSize;
-    const svgHeight = gridHeight * settings.pixelSize;
+    const { pixelGrid, palette, gridWidth, gridHeight, width, height } = imageData;
+
+    // Calculate SVG dimensions
+    let svgWidth: number, svgHeight: number;
+
+    if (maxDimension) {
+      const shorterSide = Math.min(width, height);
+      const scale = maxDimension / shorterSide;
+      svgWidth = Math.round(width * scale);
+      svgHeight = Math.round(height * scale);
+    } else {
+      svgWidth = width;
+      svgHeight = height;
+    }
+
+    // Calculate block size
+    const blockWidth = svgWidth / gridWidth;
+    const blockHeight = svgHeight / gridHeight;
 
     let svgContent = this.generateSVGHeader(svgWidth, svgHeight);
 
     if (settings.mode === 'color' && palette) {
-      svgContent += this.generateGroupedColorSVG(pixelGrid, settings, palette);
+      svgContent += this.generateGroupedColorSVG(pixelGrid, blockWidth, blockHeight, palette);
     } else {
-      svgContent += this.generateSimpleSVG(pixelGrid, settings);
+      svgContent += this.generateSimpleSVG(pixelGrid, blockWidth, blockHeight);
     }
 
     svgContent += '</svg>';
