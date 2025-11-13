@@ -26,20 +26,50 @@ const Editor: React.FC = () => {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [settings, setSettings] = useState<ConversionSettings>(DEFAULT_SETTINGS);
   const [processing, setProcessing] = useState(false);
+  const [generatingPreview, setGeneratingPreview] = useState(false);
   const [outputData, setOutputData] = useState<string | null>(null);
   const [exportFormat, setExportFormat] = useState<'svg' | 'png' | 'jpg'>('svg');
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const previewImageRef = useRef<HTMLImageElement>(null);
+  const previewTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Generate preview by calling the backend with current settings
+  const generatePreview = useCallback(async (file: File, currentSettings: ConversionSettings) => {
+    if (!file) return;
+
+    setGeneratingPreview(true);
+
+    try {
+      // Call backend with PNG format for preview (faster than SVG)
+      const response = await api.convertImage(file, {
+        settings: currentSettings,
+        format: 'png',
+        maxWidth: 800, // Lower resolution for faster preview
+      });
+
+      if (response.fileData) {
+        setPreviewUrl(response.fileData);
+      } else {
+        console.error('No preview data received');
+      }
+    } catch (error) {
+      console.error('Preview generation error:', error);
+      // Don't show error toast for preview failures
+    } finally {
+      setGeneratingPreview(false);
+    }
+  }, []);
 
   // File drop handler
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const file = acceptedFiles[0];
     if (file) {
       setUploadedFile(file);
-      const url = URL.createObjectURL(file);
-      setPreviewUrl(url);
+      setPreviewUrl(null);
       setOutputData(null);
+      // Generate initial preview after file is set
+      setTimeout(() => generatePreview(file, DEFAULT_SETTINGS), 100);
     }
-  }, []);
+  }, [generatePreview]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -52,73 +82,26 @@ const Editor: React.FC = () => {
     maxSize: 50 * 1024 * 1024, // 50MB for everyone
   });
 
-  // Draw pixelated preview on canvas with real-time updates
+  // Debounced preview generation when settings change
   useEffect(() => {
-    if (!previewUrl || !canvasRef.current) return;
+    if (!uploadedFile) return;
 
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    // Clear existing timer
+    if (previewTimerRef.current) {
+      clearTimeout(previewTimerRef.current);
+    }
 
-    const img = new Image();
-    img.onload = () => {
-      // Calculate preview dimensions
-      const maxWidth = 600;
-      const maxHeight = 400;
-      let width = img.width;
-      let height = img.height;
+    // Set new timer to generate preview after 500ms of no changes
+    previewTimerRef.current = setTimeout(() => {
+      generatePreview(uploadedFile, settings);
+    }, 500);
 
-      if (width > maxWidth) {
-        height = (height * maxWidth) / width;
-        width = maxWidth;
+    return () => {
+      if (previewTimerRef.current) {
+        clearTimeout(previewTimerRef.current);
       }
-      if (height > maxHeight) {
-        width = (width * maxHeight) / height;
-        height = maxHeight;
-      }
-
-      canvas.width = width;
-      canvas.height = height;
-
-      // Calculate grid dimensions based on size setting
-      const shorterSide = Math.min(img.width, img.height);
-      const longerSide = Math.max(img.width, img.height);
-      const aspectRatio = longerSide / shorterSide;
-
-      let gridWidth: number, gridHeight: number;
-      if (img.width <= img.height) {
-        gridWidth = settings.size;
-        gridHeight = Math.round(settings.size * aspectRatio);
-      } else {
-        gridWidth = Math.round(settings.size * aspectRatio);
-        gridHeight = settings.size;
-      }
-
-      // Draw pixelated preview
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(img, 0, 0, gridWidth, gridHeight);
-
-      // Get pixel data
-      const imageData = ctx.getImageData(0, 0, gridWidth, gridHeight);
-      const data = imageData.data;
-
-      // Apply threshold for B&W mode
-      if (settings.mode === 'bw') {
-        for (let i = 0; i < data.length; i += 4) {
-          const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-          const value = gray >= settings.threshold ? 255 : 0;
-          data[i] = value;
-          data[i + 1] = value;
-          data[i + 2] = value;
-        }
-        ctx.putImageData(imageData, 0, 0);
-      }
-
-      // Scale up to show pixels
-      ctx.drawImage(canvas, 0, 0, gridWidth, gridHeight, 0, 0, width, height);
     };
-    img.src = previewUrl;
-  }, [previewUrl, settings.size, settings.threshold, settings.mode, settings.dithering, settings.paletteSize, settings.blur]);
+  }, [uploadedFile, settings.size, settings.threshold, settings.mode, settings.dithering, settings.paletteSize, settings.blur]);
 
   // Handle conversion
   const handleConvert = async () => {
@@ -174,8 +157,11 @@ const Editor: React.FC = () => {
     }
 
     try {
-      const ext = exportFormat; // Use the selected export format
-      downloadFile(outputData, `pixelated-${Date.now()}.${ext}`);
+      const ext = exportFormat;
+      const now = new Date();
+      const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const filename = `bitmap-${timestamp}.${ext}`;
+      downloadFile(outputData, filename);
       toast.success('Downloaded!');
     } catch (error) {
       console.error('Download error:', error);
@@ -242,15 +228,33 @@ const Editor: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Canvas Preview */}
+                {/* Preview */}
                 <div className="bg-white rounded-lg p-4 shadow">
-                  <h3 className="font-medium text-gray-900 mb-3">Preview</h3>
-                  <div className="flex items-center justify-center bg-gray-100 rounded p-4">
-                    <canvas
-                      ref={canvasRef}
-                      className="max-w-full h-auto"
-                      style={{ imageRendering: 'pixelated' }}
-                    />
+                  <h3 className="font-medium text-gray-900 mb-3">
+                    Preview
+                    {generatingPreview && (
+                      <span className="ml-2 text-sm text-gray-500">(updating...)</span>
+                    )}
+                  </h3>
+                  <div className="flex items-center justify-center bg-gray-100 rounded p-4 min-h-[300px]">
+                    {previewUrl ? (
+                      <img
+                        ref={previewImageRef}
+                        src={previewUrl}
+                        alt="Preview"
+                        className="max-w-full h-auto"
+                        style={{ imageRendering: 'pixelated' }}
+                      />
+                    ) : generatingPreview ? (
+                      <div className="text-gray-500 flex flex-col items-center gap-2">
+                        <Loader className="w-8 h-8 animate-spin" />
+                        <p>Generating preview...</p>
+                      </div>
+                    ) : (
+                      <div className="text-gray-400">
+                        Upload an image to see preview
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
